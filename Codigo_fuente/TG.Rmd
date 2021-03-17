@@ -1,0 +1,693 @@
+---
+title: "Estudio de la popularidad de la universidad del valle frente al paro estudiantil ocurrido entre octubre y diciembre del 2018 mediante el uso del análisis de sentimientos - Código fuente"
+author: "Victor Duvan Ruiz Ochoa"
+output: html_document
+---
+*2021*
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Librerías utilizadas.
+```{r message=F, warning=F}
+library(tm)
+library(stringi)
+library(stringr)
+library(dplyr)
+library(naivebayes)
+library(e1071)
+library(caret)
+library(C50)
+library(class)
+library(rpart)
+library(neuralnet) 
+library(DMwR)
+library(MLmetrics)
+library(quanteda)
+library(ggplot2)
+```
+
+
+Se importan los datos obtenidos con las herramienta de web scraping del autor Jefferson Henrique disponible [en este enlace]( https://github.com/Jefferson-Henrique/GetOldTweets-python). También se ordena el data frame y se filtran las cuentas que se establecieron.
+```{r}
+univalle <- read.csv("univalle.csv", sep = ";", quote = "", encoding = "UTF-8")
+u <- univalle[!grepl("#",univalle$id) & !grepl("@",univalle$id) & univalle$id != "",]
+
+udv <- read.csv("universidad_del_valle.csv", sep = ";", quote = "", encoding = "UTF-8")
+u2 <- udv[!grepl("#",udv$id) & !grepl("@",udv$id) & udv$id != "",]
+
+
+datos.raw <- rbind(u,u2)
+
+datos.raw <- datos.raw[!duplicated(datos.raw$id), ]
+datos.raw <- datos.raw[!duplicated(datos.raw$text), ]
+
+datos.raw <- datos.raw[!(datos.raw$username %in% c("XIXCAMUV", "UnivalleCol", "Univalle_FSalud", "Univalle_Nic", 
+                               "univallebolivia", "UnivalleBun", "univalle_pln")),]
+
+datos.raw$id <- str_replace_all(datos.raw$id, "[^[:alnum:]]", "")
+```
+
+
+Se extrae la muestra con 900 publicaciones para la clasificación en la aplicación externa.
+```{r}
+to_app <- sample_n(datos.raw, size= 900)
+to_app <- to_app[,c("id","username","text")]
+to_app$sentiment <- rep("",length(to_app$id))
+write.csv(to_app,file="datos.csv",row.names = FALSE)
+```
+
+
+Se importan el resultado de la clasificación de los datos.
+```{r}
+datos.clasificados <- read.csv("datos_clasificados.csv")
+```
+
+
+Se realiza el proceso de tokenizacióny se crea una función para ello.
+```{r}
+limpiar <- function(texs){
+  tokens <- gsub("[[:cntrl:]]", " ", texs)
+  tokens <- tolower(tokens)
+  tokens <- removeWords(tokens, words = c(stopwords("spanish"),"www","http","https","com"))
+  tokens <- str_replace_all(tokens, "[^[:alnum:]]", " ")
+  tokens <- removePunctuation(tokens)
+  tokens <- removeNumbers(tokens)
+  tokens <- stripWhitespace(tokens)
+  tokens <- stri_trans_general(tokens,"Latin-ASCII")
+  tokens
+}
+tokens <- limpiar(datos.clasificados$text)
+```
+
+
+Se realiza el proceso de TF-IDF.
+```{r}
+doc.dfm <- dfm(x = tokens)
+doc.dfm <- dfm_select(doc.dfm, min_nchar = 3, max_nchar = 15)
+doc.matriz.tfidf <- dfm_trim(x = doc.dfm, min_docfreq = 7)
+doc.matriz.tfidf <- dfm_tfidf(doc.matriz.tfidf, scheme_tf = "prop", scheme_df = "inverse")
+datos.matriz.tfidf <- data.frame(sentiment=datos.clasificados$sentiment, 
+                                 convert(doc.matriz.tfidf, to="data.frame")[,-1])
+datos.matriz.tfidf$sentiment <- as.factor(datos.matriz.tfidf$sentiment)
+```
+
+
+Se crea un diccionario con los parámetros de entrada de los modelos para los datos futuros.
+```{r}
+dimensiones.matriz.tfidf <- doc.matriz.tfidf@Dimnames$features
+dimensiones.matriz.tfidf <- as.list(dimensiones.matriz.tfidf)
+names(dimensiones.matriz.tfidf) <- unlist(dimensiones.matriz.tfidf)
+dimensiones.matriz.tfidf <- dictionary(dimensiones.matriz.tfidf)
+```
+
+## Analisis exploratorio de los datos
+
+Se crea los graficos del número de publicaciones hechas a través del tiempo.
+```{r}
+#pdf(file = "numero_de_tweets_publicados.pdf",height = 5, width = 10)  # abrir el device, en este caso pdf  
+
+ggplot(datos.raw, aes(x = as.Date(date))) +
+  geom_histogram(colour = "#8B0000",fill="#FF0000")+
+  labs(x = "Fecha de publicación", y = "Número de tweets") +
+  theme(axis.text.x = element_text(angle = 90))
+
+#dev.off() 
+
+
+#pdf(file = "numero_de_tweets_publicados_2.pdf",height = 5, width = 10)
+tweets_mes_anyo <- datos.raw %>% mutate(mes_anyo = format(as.Date(date), "%m-%d"))
+tweets_mes_anyo %>% group_by(mes_anyo) %>% summarise(n = n())%>%
+  ggplot(aes(x = mes_anyo, y = n)) +
+  geom_line(aes(group=1),size=0.8,color="red") +
+  geom_point(aes(group=1),size=1,color="red")+
+  labs( x = "Fecha de publicación",
+       y = "Número de tweets") +
+  theme(axis.text.x = element_text(angle = 90, size = 6))
+#dev.off() 
+```
+
+Se crea el grafico de las palabras mas usadas por los usuarios.
+```{r}
+tokens.all <- limpiar(datos.raw$text)
+
+frecuencia <- dfm_select(dfm(x = tokens.all),min_nchar = 3, max_nchar=15)[,-1] %>% 
+  colSums() %>% sort(decreasing = TRUE)
+frecuencia <- data.frame(palabra = names(frecuencia), frec = frecuencia)
+row.names(frecuencia) <- 1:length(frecuencia$frec)
+
+#pdf(file = "palabras_mas_usadas.pdf",height = 5, width = 10)
+ggplot(data=frecuencia[4:8,], aes(y = frec,x = reorder(palabra,frec))) + 
+  geom_bar(stat="identity",colour = "#8B0000",fill="#FF0000") + 
+  coord_flip()+
+  labs( x = "Palabras",
+       y = "Repeticiones")
+#dev.off() 
+
+```
+
+Se crea el grafico de los usuarios con mas publicaciones.
+```{r}
+frecuencia_users <- table(datos.raw$username)%>% sort(decreasing = TRUE)
+frecuencia_users <- data.frame(user = names(frecuencia_users), frecuencia_users)
+
+#pdf(file = "usuarios_mas_publicaciones.pdf",height = 5, width = 10)
+ggplot(frecuencia_users[1:5,], aes(x = reorder(user, -Freq), y=Freq)) +
+  geom_histogram(stat="identity",colour = "#8B0000",fill="#FF0000")+
+  labs(x = "Usuarios", y = "Número de tweets") +
+  theme(axis.text.x = element_text(angle = 90))
+#dev.off() 
+```
+
+## Entrenamiento de los modelos de clasificación
+
+Se separa los datos en 70% para entrenamiento y 30% para pruebas.
+```{r}
+set.seed(45)
+ind <- sample(2,nrow(datos.matriz.tfidf), replace = TRUE, prob = c(0.7,0.3) ) #70% entrenamiento y 30% test
+trainData<- datos.matriz.tfidf[ind==1,]
+testData<- datos.matriz.tfidf[ind==2,]
+```
+
+### Entrenamiento y evaluación sin técnicas de balanceo de datos
+
+Entrenamiento y evaluación del modelo SVM.
+```{r}
+svm <- svm(sentiment~., data=trainData, kernel='sigmoid')
+prediction.svm <- predict(svm, newdata = testData[,-1])
+
+confusionMatrix(table(testData[,1],prediction.svm))
+
+F1_Score(testData$sentiment, prediction.svm,"-1")
+F1_Score(testData$sentiment, prediction.svm,"0")
+F1_Score(testData$sentiment, prediction.svm,"1")
+
+Recall(testData$sentiment, prediction.svm,"-1")
+Recall(testData$sentiment, prediction.svm,"0")
+Recall(testData$sentiment, prediction.svm,"1")
+
+Precision(testData$sentiment, prediction.svm,"-1")
+Precision(testData$sentiment, prediction.svm,"0")
+Precision(testData$sentiment, prediction.svm,"1")
+```
+
+Entrenamiento y evaluación del modelo árbol de decisión.
+```{r}
+arbol <- rpart(sentiment ~ ., data = trainData)
+prediccion.arbol <- predict(arbol, newdata = testData, type = "class")
+
+confusionMatrix(prediccion.arbol, testData$sentiment)
+
+F1_Score(testData$sentiment, prediccion.arbol,"-1")
+F1_Score(testData$sentiment, prediccion.arbol,"0")
+F1_Score(testData$sentiment, prediccion.arbol,"1")
+
+Recall(testData$sentiment, prediccion.arbol,"-1")
+Recall(testData$sentiment, prediccion.arbol,"0")
+Recall(testData$sentiment, prediccion.arbol,"1")
+
+Precision(testData$sentiment, prediccion.arbol,"-1")
+Precision(testData$sentiment, prediccion.arbol,"0")
+Precision(testData$sentiment, prediccion.arbol,"1")
+```
+
+
+Entrenamiento y evaluación del modelo KNN. 
+```{r}
+knn_3 <- knn(train =trainData[,-1],test =testData[,-1],cl=trainData$sentiment,k=3)
+
+confusionMatrix(table(testData$sentiment,knn_3))
+
+F1_Score(testData$sentiment, knn_3,"-1")
+F1_Score(testData$sentiment, knn_3,"0")
+F1_Score(testData$sentiment, knn_3,"1")
+
+Recall(testData$sentiment, knn_3,"-1")
+Recall(testData$sentiment, knn_3,"0")
+Recall(testData$sentiment, knn_3,"1")
+
+Precision(testData$sentiment, knn_3,"-1")
+Precision(testData$sentiment, knn_3,"0")
+Precision(testData$sentiment, knn_3,"1")
+```
+
+Entrenamiento y evaluación de la red neuronal.
+```{r}
+trainDataNet <- trainData
+trainDataNet$sentiment <- as.numeric(trainDataNet$sentiment) - 1
+testDataNet <- testData
+testDataNet$sentiment <- as.numeric(testDataNet$sentiment) - 1
+
+neur <- neuralnet(sentiment ~ ., data=trainDataNet, hidden=c(150,40,20), threshold=0.01)
+neur.pred <- compute(neur, testDataNet[,-1])
+
+net.result <- data.frame(actual=testDataNet[,1], pred=neur.pred$net.result)
+net.result <- data.frame(sapply(net.result, round, digits=0))
+
+pred.fix <- ifelse(net.result$pred<0, 0, net.result$pred)
+pred.fix <- ifelse(pred.fix>2, 2, pred.fix)
+
+confusionMatrix(table(net.result$actual,pred.fix))
+
+F1_Score(net.result$actual, pred.fix,"0")
+F1_Score(net.result$actual, pred.fix,"1")
+F1_Score(net.result$actual, pred.fix,"2")
+
+Recall(net.result$actual, pred.fix,"0")
+Recall(net.result$actual, pred.fix,"1")
+Recall(net.result$actual, pred.fix,"2")
+
+Precision(net.result$actual, pred.fix,"0")
+Precision(net.result$actual, pred.fix,"1")
+Precision(net.result$actual, pred.fix,"2")
+```
+ 
+
+### Entrenamiento y evaluación con la técnica downsampling
+
+Se aplica esta técnica a los datos de entrenamiento y prueba.
+```{r}
+downSampled.train = downSample(trainData[, -1], as.factor(trainData$sentiment))
+downSampled.test = downSample(testData[, -1], as.factor(testData$sentiment))
+```
+
+
+Entrenamiento y evaluación del modelo SVM.
+```{r}
+svm.down <- svm(Class~., data=downSampled.train, kernel='sigmoid')
+prediction.downsvm <- predict(svm.down, newdata = downSampled.test[,-(dim(downSampled.test)[2])])
+
+confusionMatrix(table(downSampled.test$Class,prediction.downsvm))
+
+F1_Score(downSampled.test$Class, prediction.downsvm,"-1")
+F1_Score(downSampled.test$Class, prediction.downsvm,"0")
+F1_Score(downSampled.test$Class, prediction.downsvm,"1")
+
+Recall(downSampled.test$Class, prediction.downsvm,"-1")
+Recall(downSampled.test$Class, prediction.downsvm,"0")
+Recall(downSampled.test$Class, prediction.downsvm,"1")
+
+Precision(downSampled.test$Class, prediction.downsvm,"-1")
+Precision(downSampled.test$Class, prediction.downsvm,"0")
+Precision(downSampled.test$Class, prediction.downsvm,"1")
+```
+
+
+Entrenamiento y evaluación del modelo árbol de decisión.
+```{r}
+arbol.down <- rpart(Class ~ ., data = downSampled.train)
+prediccion.down.arbol <- predict(arbol.down, newdata = downSampled.test[,-(dim(downSampled.test)[2])], type = "class")
+confusionMatrix(table(downSampled.test$Class,prediccion.down.arbol ))
+
+F1_Score(downSampled.test$Class, prediccion.down.arbol,"-1")
+F1_Score(downSampled.test$Class, prediccion.down.arbol,"0")
+F1_Score(downSampled.test$Class, prediccion.down.arbol,"1")
+
+Recall(downSampled.test$Class, prediccion.down.arbol,"-1")
+Recall(downSampled.test$Class, prediccion.down.arbol,"0")
+Recall(downSampled.test$Class, prediccion.down.arbol,"1")
+
+Precision(downSampled.test$Class, prediccion.down.arbol,"-1")
+Precision(downSampled.test$Class, prediccion.down.arbol,"0")
+Precision(downSampled.test$Class, prediccion.down.arbol,"1")
+```
+
+
+Entrenamiento y evaluación del modelo KNN.
+```{r}
+knn_3.down <- knn(downSampled.train[,-(dim(downSampled.test)[2])],
+                       downSampled.test[,-(dim(downSampled.test)[2])],
+                       cl=downSampled.train$Class,k=3)
+
+confusionMatrix(table(knn_3.down,downSampled.test$Class))
+
+F1_Score(downSampled.test$Class, knn_3.down,"-1")
+F1_Score(downSampled.test$Class, knn_3.down,"0")
+F1_Score(downSampled.test$Class, knn_3.down,"1")
+
+Recall(downSampled.test$Class, knn_3.down,"-1")
+Recall(downSampled.test$Class, knn_3.down,"0")
+Recall(downSampled.test$Class, knn_3.down,"1")
+
+Precision(downSampled.test$Class, knn_3.down,"-1")
+Precision(downSampled.test$Class, knn_3.down,"0")
+Precision(downSampled.test$Class, knn_3.down,"1")
+```
+
+
+Entrenamiento y evaluación de la red neuronal.
+```{r}
+trainDataNet.Down <- downSampled.train
+trainDataNet.Down$Class <- as.numeric(trainDataNet.Down$Class) - 1
+testDataNet.Down <- downSampled.test
+testDataNet.Down$Class <- as.numeric(testDataNet.Down$Class) - 1
+
+neur.down <- neuralnet(Class ~ ., data=trainDataNet.Down, hidden=c(150,40,20), threshold=0.01)
+neur.down.pred <- compute(neur.down, testDataNet.Down[,-(dim(downSampled.test)[2])])
+net.down.result <- data.frame(actual=testDataNet.Down$Class, pred=neur.down.pred$net.result)
+net.down.result <- data.frame(sapply(net.down.result, round, digits=0))
+
+pred.down.fix <- ifelse(net.down.result$pred<0, 0, net.down.result$pred)
+pred.down.fix <- ifelse(pred.down.fix>2, 2, pred.down.fix)
+
+confusionMatrix(table(net.down.result$actual,pred.down.fix))
+
+F1_Score(net.down.result$actual, pred.down.fix,"0")
+F1_Score(net.down.result$actual, pred.down.fix,"1")
+F1_Score(net.down.result$actual, pred.down.fix,"2")
+
+Recall(net.down.result$actual, pred.down.fix,"0")
+Recall(net.down.result$actual, pred.down.fix,"1")
+Recall(net.down.result$actual, pred.down.fix,"2")
+
+Precision(net.down.result$actual, pred.down.fix,"0")
+Precision(net.down.result$actual, pred.down.fix,"1")
+Precision(net.down.result$actual, pred.down.fix,"2")
+```
+
+
+### Entrenamiento y evaluación con la técnica upsampling
+
+Se aplica esta técnica a los datos de entrenamiento y prueba.
+```{r}
+upSampled.train = upSample(trainData[, -1], as.factor(trainData$sentiment))
+upSampled.test = upSample(testData[, -1], as.factor(testData$sentiment))
+```
+
+Entrenamiento y evaluación del modelo SVM.
+```{r}
+svm.up <- svm(Class~., data=upSampled.train, kernel='sigmoid')
+prediction.upsvm <- predict(svm.up, newdata = upSampled.test[,-(dim(upSampled.test)[2])])
+confusionMatrix(table(upSampled.test$Class,prediction.upsvm))
+
+F1_Score(upSampled.test$Class, prediction.upsvm,"-1")
+F1_Score(upSampled.test$Class, prediction.upsvm,"0")
+F1_Score(upSampled.test$Class, prediction.upsvm,"1")
+
+Recall(upSampled.test$Class, prediction.upsvm,"-1")
+Recall(upSampled.test$Class, prediction.upsvm,"0")
+Recall(upSampled.test$Class, prediction.upsvm,"1")
+
+Precision(upSampled.test$Class, prediction.upsvm,"-1")
+Precision(upSampled.test$Class, prediction.upsvm,"0")
+Precision(upSampled.test$Class, prediction.upsvm,"1")
+```
+
+Entrenamiento y evaluación del modelo árbol de decisión.
+```{r}
+arbol.up <- rpart(Class ~ ., data = upSampled.train)
+prediccion.up.arbol <- predict(arbol.up, newdata = upSampled.test[,-(dim(upSampled.test)[2])], type = "class")
+confusionMatrix(table(prediccion.up.arbol, upSampled.test$Class))
+
+F1_Score(upSampled.test$Class, prediccion.up.arbol,"-1")
+F1_Score(upSampled.test$Class, prediccion.up.arbol,"0")
+F1_Score(upSampled.test$Class, prediccion.up.arbol,"1")
+
+Recall(upSampled.test$Class, prediccion.up.arbol,"-1")
+Recall(upSampled.test$Class, prediccion.up.arbol,"0")
+Recall(upSampled.test$Class, prediccion.up.arbol,"1")
+
+Precision(upSampled.test$Class, prediccion.up.arbol,"-1")
+Precision(upSampled.test$Class, prediccion.up.arbol,"0")
+Precision(upSampled.test$Class, prediccion.up.arbol,"1")
+```
+
+Entrenamiento y evaluación del modelo KNN.
+```{r}
+knn_3.up <- knn(upSampled.train[,-(dim(upSampled.train)[2])],
+                     upSampled.test[,-(dim(upSampled.test)[2])],
+                       cl=upSampled.train$Class,k=3)
+confusionMatrix(table(knn_3.up,upSampled.test$Class))
+
+F1_Score(upSampled.test$Class, knn_3.up,"-1")
+F1_Score(upSampled.test$Class, knn_3.up,"0")
+F1_Score(upSampled.test$Class, knn_3.up,"1")
+
+Recall(upSampled.test$Class, knn_3.up,"-1")
+Recall(upSampled.test$Class, knn_3.up,"0")
+Recall(upSampled.test$Class, knn_3.up,"1")
+
+Precision(upSampled.test$Class, knn_3.up,"-1")
+Precision(upSampled.test$Class, knn_3.up,"0")
+Precision(upSampled.test$Class, knn_3.up,"1")
+```
+
+Entrenamiento y evaluación de la red neuronal.
+```{r}
+trainDataNet.up <- upSampled.train
+trainDataNet.up$Class <- as.numeric(trainDataNet.up$Class) - 1
+testDataNet.up <- upSampled.test
+testDataNet.up$Class <- as.numeric(testDataNet.up$Class) - 1
+
+neur.up <- neuralnet(Class ~ ., data=trainDataNet.up, hidden=c(150,40,20), threshold=0.01)
+neur.up.pred <- compute(neur.up, testDataNet.up[,-(dim(downSampled.test)[2])])
+net.up.result <- data.frame(actual=testDataNet.up[,(dim(downSampled.test)[2])], pred=neur.up.pred$net.result)
+net.up.result <- data.frame(sapply(net.up.result, round, digits=0))
+
+pred.up.fix <- ifelse(net.up.result$pred<0, 0, net.up.result$pred)
+pred.up.fix <- ifelse(pred.up.fix>2, 2, pred.up.fix)
+
+confusionMatrix(table(net.up.result$actual,pred.up.fix))
+
+F1_Score(net.up.result$actual, pred.up.fix,"0")
+F1_Score(net.up.result$actual, pred.up.fix,"1")
+F1_Score(net.up.result$actual, pred.up.fix,"2")
+
+Recall(net.up.result$actual, pred.up.fix,"0")
+Recall(net.up.result$actual, pred.up.fix,"1")
+Recall(net.up.result$actual, pred.up.fix,"2")
+
+Precision(net.up.result$actual, pred.up.fix,"0")
+Precision(net.up.result$actual, pred.up.fix,"1")
+Precision(net.up.result$actual, pred.up.fix,"2")
+```
+
+### Entrenamiento y evaluación con la técnica smote
+
+Se aplica esta técnica a los datos de entrenamiento y prueba.
+```{r}
+smotedSampled.train = SMOTE(sentiment~., trainData)
+smotedSampled.test = SMOTE(sentiment~., testData)
+```
+
+Entrenamiento y evaluación del modelo SVM.
+```{r}
+svm.smoted <- svm(sentiment~., data=smotedSampled.train, kernel='sigmoid') 
+prediction.smotedsvm <- predict(svm.smoted, newdata = smotedSampled.test[,-1])
+
+confusionMatrix(table(smotedSampled.test$sentiment,prediction.smotedsvm))
+
+F1_Score(smotedSampled.test$sentiment, prediction.smotedsvm,"-1")
+F1_Score(smotedSampled.test$sentiment, prediction.smotedsvm,"0")
+F1_Score(smotedSampled.test$sentiment, prediction.smotedsvm,"1")
+
+Recall(smotedSampled.test$sentiment, prediction.smotedsvm,"-1")
+Recall(smotedSampled.test$sentiment, prediction.smotedsvm,"0")
+Recall(smotedSampled.test$sentiment, prediction.smotedsvm,"1")
+
+Precision(smotedSampled.test$sentiment, prediction.smotedsvm,"-1")
+Precision(smotedSampled.test$sentiment, prediction.smotedsvm,"0")
+Precision(smotedSampled.test$sentiment, prediction.smotedsvm,"1")
+```
+
+Entrenamiento y evaluación del modelo árbol de decisión.
+```{r}
+arbol.smoted <- rpart(sentiment ~ ., data = smotedSampled.train) 
+prediccion.smoted.arbol <- predict(arbol.smoted, newdata = smotedSampled.test[,-1], type = "class")
+confusionMatrix(table(prediccion.smoted.arbol, smotedSampled.test$sentiment))
+
+F1_Score(smotedSampled.test$sentiment, prediccion.smoted.arbol,"-1")
+F1_Score(smotedSampled.test$sentiment, prediccion.smoted.arbol,"0")
+F1_Score(smotedSampled.test$sentiment, prediccion.smoted.arbol,"1")
+
+Recall(smotedSampled.test$sentiment, prediccion.smoted.arbol,"-1")
+Recall(smotedSampled.test$sentiment, prediccion.smoted.arbol,"0")
+Recall(smotedSampled.test$sentiment, prediccion.smoted.arbol,"1")
+
+Precision(smotedSampled.test$sentiment, prediccion.smoted.arbol,"-1")
+Precision(smotedSampled.test$sentiment, prediccion.smoted.arbol,"0")
+Precision(smotedSampled.test$sentiment, prediccion.smoted.arbol,"1")
+```
+
+Entrenamiento y evaluación del modelo KNN.
+```{r}
+knn_3.smoted <- knn(smotedSampled.train[,-1],smotedSampled.test[,-1],
+                       cl=smotedSampled.train$sentiment,k=3) 
+confusionMatrix(table(knn_3.smoted,smotedSampled.test$sentiment))
+
+F1_Score(smotedSampled.test$sentiment, knn_3.smoted,"-1")
+F1_Score(smotedSampled.test$sentiment, knn_3.smoted,"0")
+F1_Score(smotedSampled.test$sentiment, knn_3.smoted,"1")
+
+Recall(smotedSampled.test$sentiment, knn_3.smoted,"-1")
+Recall(smotedSampled.test$sentiment, knn_3.smoted,"0")
+Recall(smotedSampled.test$sentiment, knn_3.smoted,"1")
+
+Precision(smotedSampled.test$sentiment, knn_3.smoted,"-1")
+Precision(smotedSampled.test$sentiment, knn_3.smoted,"0")
+Precision(smotedSampled.test$sentiment, knn_3.smoted,"1")
+```
+
+Entrenamiento y evaluación de la red neuronal.
+```{r}
+trainDataNet.smote <- smotedSampled.train
+trainDataNet.smote$sentiment <- as.numeric(trainDataNet.smote$sentiment) - 1
+testDataNet.smote <- smotedSampled.test
+testDataNet.smote$sentiment <- as.numeric(testDataNet.smote$sentiment) - 1
+
+neur.smoted <- neuralnet(sentiment ~ ., data=trainDataNet.smote, hidden=c(150,40,20), threshold=0.01) 
+neur.smoted.pred <- compute(neur.smoted, testDataNet.smote[,-1])
+net.smoted.result <- data.frame(actual=testDataNet.smote[,1], pred=neur.smoted.pred$net.result)
+net.smoted.result <- data.frame(sapply(net.smoted.result, round, digits=0))
+
+pred.smoted.fix <- ifelse(net.smoted.result$pred<0, 0, net.smoted.result$pred)
+pred.smoted.fix <- ifelse(pred.smoted.fix>2, 2, pred.smoted.fix)
+
+confusionMatrix(table(net.smoted.result$actual,pred.smoted.fix))
+
+F1_Score(net.smoted.result$actual, pred.smoted.fix,"0")
+F1_Score(net.smoted.result$actual, pred.smoted.fix,"1")
+F1_Score(net.smoted.result$actual, pred.smoted.fix,"2")
+
+Recall(net.smoted.result$actual, pred.smoted.fix,"0")
+Recall(net.smoted.result$actual, pred.smoted.fix,"1")
+Recall(net.smoted.result$actual, pred.smoted.fix,"2")
+
+Precision(net.smoted.result$actual, pred.smoted.fix,"0")
+Precision(net.smoted.result$actual, pred.smoted.fix,"1")
+Precision(net.smoted.result$actual, pred.smoted.fix,"2")
+```
+
+
+## Clasificación del total de datos recolectados
+
+Se realiza el preprocesamiento a los datos y se clasifica con el modelo SVM entrenado con los datos con la técnica de upsampling, obteniendo las clasificaciones totales.
+```{r}
+tokens.all <- limpiar(datos.raw$text)
+
+tokens.all.dfm <- dfm(x = tokens.all,dictionary = dimensiones.matriz.tfidf)
+tokens.all.tfidf <- dfm_tfidf(tokens.all.dfm, scheme_tf = "prop",
+                                scheme_df = "inverse")
+tokens.all.tfidf <- convert(tokens.all.tfidf, to="data.frame")[,-1]
+
+sentiment.total <- predict(svm.up, newdata = tokens.all.tfidf)
+
+
+data.frame(table(sentiment.total))
+```
+
+
+## Análisis exploratorio de los datos clasificados
+
+Se realiza el gráfico del porcentaje de las clasificaciones realizadas. 
+```{r}
+df.sentimet.total <- data.frame(Porcentaje=100*table(sentiment.total)/length(sentiment.total), 
+                                Sentimiento=c("Negativo","Neutro","Positivo"))
+
+df.sentimet.total <- df.sentimet.total[,c(2,3)]
+names(df.sentimet.total) <- c("Porcentaje","Sentimiento")
+
+#pdf(file = "total_clasificaciones.pdf",height = 5, width = 5)
+
+ggplot(df.sentimet.total, aes(x=1, y=Porcentaje, fill=Sentimiento)) +
+        geom_bar(stat="identity") +
+        geom_text(aes(label = paste0(round(Porcentaje,2),"%")), 
+                  position = position_stack(vjust = 0.5)) +
+        coord_polar(theta = "y")+theme_void()
+#dev.off() 
+
+```
+
+
+Se realiza el gráfico del número de publicaciones por sentimiento. 
+
+```{r}
+tweets_mes_anyo <- datos.raw %>% mutate(mes_anyo = format(as.Date(date), "%m-%d"))
+tweets_mes_anyo$Sentimiento <- ifelse(sentiment.total==-1,"Negativo",
+                                    ifelse(sentiment.total==0,"Neutro","positivo"))
+
+#pdf(file = "numero_tweets_publicados_por_sentimiento.pdf",height = 5, width = 10)
+tweets_mes_anyo %>% group_by (Sentimiento, mes_anyo) %>% summarise(n = n()) %>%
+  ggplot(aes(x = mes_anyo, y = n,colour=Sentimiento)) +
+  geom_point(aes(group = Sentimiento),size=0.9) +
+  geom_line(aes(group = Sentimiento),size=0.8) +
+  labs( x = "fecha de publicación",
+       y = "número de tweets") +
+  theme(axis.text.x = element_text(angle = 90, size = 6),
+        legend.position = "bottom")
+#dev.off() 
+```
+
+
+Se realiza el gráfico de las palabras mas usadas por sentimiento. 
+```{r}
+frecuencia.neg <- dfm_select(dfm(x = limpiar(datos.raw[sentiment.total==-1,])),
+                                       min_nchar = 3, 
+                                       max_nchar=15)[,-1]  %>% colSums() %>% sort(decreasing = TRUE)
+frecuencia.neg <- data.frame(palabra = names(frecuencia.neg), frec = frecuencia.neg)
+frecuencia.neg$Sentimiento <- rep("Negativo",length(frecuencia.neg$palabra))
+
+frecuencia.neu <- dfm_select(dfm(x = limpiar(datos.raw[sentiment.total==0,])),
+                                       min_nchar = 3, 
+                                       max_nchar=15)[,-1]  %>% colSums() %>% sort(decreasing = TRUE)
+frecuencia.neu <- data.frame(palabra = names(frecuencia.neu), frec = frecuencia.neu)
+frecuencia.neu$Sentimiento <- rep("Neutro",length(frecuencia.neu$palabra))
+
+frecuencia.pos <- dfm_select(dfm(x = limpiar(datos.raw[sentiment.total==1,])),
+                                       min_nchar = 3, 
+                                       max_nchar=15)[,-1]  %>% colSums() %>% sort(decreasing = TRUE)
+frecuencia.pos <- data.frame(palabra = names(frecuencia.pos), frec = frecuencia.pos)
+frecuencia.pos$Sentimiento <- rep("Positivo",length(frecuencia.pos$palabra))
+
+rm_words <- c("twitter","status","univalle","universidad","valle")
+
+frecuencia <- rbind(frecuencia.neg[! frecuencia.neg$palabra %in% rm_words,][1:5,],
+                    frecuencia.neu[! frecuencia.neu$palabra %in% rm_words,][1:5,],
+                    frecuencia.pos[! frecuencia.pos$palabra %in% rm_words,][1:5,])
+
+
+#pdf(file = "palabras_mas_usadas_por_sentimiento.pdf",height = 5, width = 10)
+ggplot(frecuencia, aes(x = reorder(palabra,frec), y = frec, fill = Sentimiento)) +
+                geom_col() +
+                labs(y = "Número de repeticiones", x = "Palabras") +
+                theme(legend.position = "none") +
+                coord_flip() +
+                facet_wrap(~Sentimiento,scales = "free", ncol = 1, drop = TRUE)
+#dev.off() 
+```
+
+
+Se realiza el gráfico de los usuarios con más publicaciones en cada sentimiento. 
+```{r}
+user.neg <- table(datos.raw$username[sentiment.total==-1])
+user.neg <- data.frame(user.neg,Sentimiento=rep("Negativo",length(user.neg)))
+colnames(user.neg) <- c("Usuario","Frec","Sentimiento")
+attach(user.neg)
+user.neg <- user.neg[order(-Frec),][1:5,]
+detach(user.neg)
+
+user.neu <- table(datos.raw$username[sentiment.total==0])
+user.neu <- data.frame(user.neu,Sentimiento=rep("Neutro",length(user.neu)))
+colnames(user.neu) <- c("Usuario","Frec","Sentimiento")
+attach(user.neu)
+user.neu <- user.neu[order(-Frec),][1:5,]
+detach(user.neu)
+
+user.pos <- table(datos.raw$username[sentiment.total==1])
+user.pos <- data.frame(user.pos,Sentimiento=rep("Positivo",length(user.pos)))
+colnames(user.pos) <- c("Usuario","Frec","Sentimiento")
+attach(user.pos)
+user.pos <- user.pos[order(-Frec),][1:5,]
+detach(user.pos)
+
+total.user <- rbind(user.neg,user.neu,user.pos)
+
+#pdf(file = "tweets_usuarios_por_sentimiento.pdf",height = 7, width = 10)
+ggplot(total.user, aes(x = reorder(Usuario,Frec), y = Frec, fill = Sentimiento)) +
+                geom_col() +
+                #theme_bw() +
+                labs(y = "Número de publicaciones", x = "Usuario") +
+                theme(legend.position = "none") +
+                facet_wrap(~Sentimiento,scales = "free", ncol = 1, drop = TRUE)
+#dev.off() 
+```
