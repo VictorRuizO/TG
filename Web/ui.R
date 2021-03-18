@@ -22,9 +22,9 @@ shinyUI(fixedPage(
         column(10,titlePanel("Predicción del sentimiento"),
                em(h4("Proyecto de final de carrera")),
                p(style="text-align: justify;","Esta página tiene como propósito 
-                 clasificar nuevas opiniones en base al modelo de machine learning 
-                 estrenado en el proyecto de final de carrera con titulo ‘Estudio de 
-                 la popularidad de la universidad del valle frente al paro estudiantil 
+                 clasificar nuevas opiniones con base en el modelo de machine learning 
+                 entrenado en el proyecto de final de carrera con titulo ‘Estudio de 
+                 la popularidad de la Universidad del Valle frente al paro estudiantil 
                  ocurrido entre octubre y diciembre del 2018 mediante el uso del análisis 
                  de sentimientos’."))),
     br(),
@@ -42,7 +42,7 @@ shinyUI(fixedPage(
             h2("Instrucciones:"), 
             h4(style="text-align: justify;","1. Escriba la oración que se quiere predecir en el campo de texto."),
             h4(style="text-align: justify;","2. Presione el botón predecir."),
-            h4(style="text-align: justify;","3. El sentimiento precedido se mostrará en el texto."),
+            h4(style="text-align: justify;","3. El sentimiento predicho se mostrará en el texto."),
             h4(style="text-align: justify;","4. En la pestaña de información se muestra más información acerca del desarrollo de esta aplicación."),
             
         ),
@@ -69,8 +69,8 @@ shinyUI(fixedPage(
                          tags$a(href="https://github.com/VictorRuizO/TG",
                                 "https://github.com/VictorRuizO/TG")),
                          p(em(strong("Proyecto final: ")),
-                           tags$a(href="",
-                                  "(pendiente)"))
+                           tags$a(href="https://github.com/VictorRuizO/TG/blob/main/documento_tg.pdf",
+                                  "aquí"))
                 )
             )   
         )
